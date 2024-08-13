@@ -4,33 +4,32 @@ import android.app.Activity;
 import android.content.Context;
 import android.os.Bundle;
 import android.os.Parcelable;
-import android.util.Log;
 
 import com.android.billingclient.api.AcknowledgePurchaseParams;
 import com.android.billingclient.api.AcknowledgePurchaseResponseListener;
 import com.android.billingclient.api.BillingClient;
 import com.android.billingclient.api.BillingClient.BillingResponseCode;
 import com.android.billingclient.api.BillingClient.FeatureType;
-import com.android.billingclient.api.BillingClient.SkuType;
 import com.android.billingclient.api.BillingClientStateListener;
 import com.android.billingclient.api.BillingFlowParams;
 import com.android.billingclient.api.BillingResult;
 import com.android.billingclient.api.ConsumeParams;
 import com.android.billingclient.api.ConsumeResponseListener;
+import com.android.billingclient.api.PendingPurchasesParams;
+import com.android.billingclient.api.ProductDetails;
+import com.android.billingclient.api.ProductDetailsResponseListener;
 import com.android.billingclient.api.Purchase;
-import com.android.billingclient.api.PurchaseHistoryRecord;
-import com.android.billingclient.api.PurchaseHistoryResponseListener;
-import com.android.billingclient.api.PurchasesResponseListener;
 import com.android.billingclient.api.PurchasesUpdatedListener;
-import com.android.billingclient.api.SkuDetails;
-import com.android.billingclient.api.SkuDetailsParams;
-import com.android.billingclient.api.SkuDetailsResponseListener;
+import com.android.billingclient.api.QueryProductDetailsParams;
+import com.android.billingclient.api.QueryPurchasesParams;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 import androidx.annotation.NonNull;
@@ -45,8 +44,6 @@ import expo.modules.core.interfaces.services.EventEmitter;
  * it through BillingClient and caches temporary states/data if needed
  */
 public class BillingManager implements PurchasesUpdatedListener {
-  private static final String TAG = "BillingManager";
-
   public static final int OK = 0;
   public static final int USER_CANCELED = 1;
   public static final int ERROR = 2;
@@ -54,17 +51,16 @@ public class BillingManager implements PurchasesUpdatedListener {
   public static final int BILLING_MANAGER_NOT_INITIALIZED = -1;
   public static final String PURCHASES_UPDATED_EVENT = "Expo.purchasesUpdated";
   public static final String ACKNOWLEDGING_PURCHASE = "Acknowledging Item";
-  public static final String INAPP_SUB_PERIOD = "P0D";
   private int mBillingClientResponseCode = BILLING_MANAGER_NOT_INITIALIZED;
 
   protected static final HashMap<String, Promise> promises = new HashMap<>();
   private final List<Purchase> mPurchases = new ArrayList<>();
-  private final HashMap<String, SkuDetails> mSkuDetailsMap = new HashMap<>();
+  private final HashMap<String, ProductDetails> mProductDetailsMap = new HashMap<>();
   private BillingClient mBillingClient;
-  private EventEmitter mEventEmitter;
+  private final EventEmitter mEventEmitter;
   private boolean mIsServiceConnected;
   private final Activity mActivity;
-  private BillingUpdatesListener mBillingUpdatesListener;
+  private final BillingUpdatesListener mBillingUpdatesListener;
 
   private Set<String> mTokensToBeConsumed;
 
@@ -80,21 +76,17 @@ public class BillingManager implements PurchasesUpdatedListener {
     void onPurchasesUpdated(List<Purchase> purchases);
   }
 
-  /**
-   * Listener for the Billing client state to become connected
-   */
-  public interface ServiceConnectedListener {
-    void onServiceConnected(BillingResult resultCode);
-  }
-
   public BillingManager(Activity activity, EventEmitter eventEmitter) {
+    // Create PendingPurchasesParams
+    PendingPurchasesParams pendingPurchasesParams = PendingPurchasesParams.newBuilder().build();
+
     mActivity = activity;
     mEventEmitter = eventEmitter;
     mBillingUpdatesListener = new UpdateListener(eventEmitter);
     mBillingClient =
       BillingClient
         .newBuilder(activity)
-        .enablePendingPurchases()
+        .enablePendingPurchases(pendingPurchasesParams)
         .setListener(this)
         .build();
   }
@@ -103,20 +95,17 @@ public class BillingManager implements PurchasesUpdatedListener {
     // Start setup. This is asynchronous and the specified listener will be called
     // once setup completes.
     // It also starts to report all the new purchases through onPurchasesUpdated() callback.
-    startServiceConnection(new Runnable() {
-      @Override
-      public void run() {
-        // Notifying the listener that billing client is ready
-        mBillingUpdatesListener.onBillingClientSetupFinished();
-        promise.resolve(null);
-      }
+    startServiceConnection(() -> {
+      // Notifying the listener that billing client is ready
+      mBillingUpdatesListener.onBillingClientSetupFinished();
+      promise.resolve(null);
     });
   }
 
   public void startServiceConnection(final Runnable executeOnSuccess) {
     mBillingClient.startConnection(new BillingClientStateListener() {
       @Override
-      public void onBillingSetupFinished(BillingResult billingResult) {
+      public void onBillingSetupFinished(@NonNull BillingResult billingResult) {
         final int responseCode = billingResult.getResponseCode();
         if (responseCode == BillingResponseCode.OK) {
           mIsServiceConnected = true;
@@ -143,41 +132,56 @@ public class BillingManager implements PurchasesUpdatedListener {
     ReadableArguments accountIdentifiers = d.getArguments("accountIdentifiers");
     // Boolean isVrPurchaseFlow = d.getBoolean("isVrPurchaseFlow");
 
-    Runnable purchaseFlowRequest = new Runnable() {
-      @Override
-      public void run() {
-        SkuDetails skuDetails = mSkuDetailsMap.get(skuId);
-        if (skuDetails == null) {
-          promise.reject("E_ITEM_NOT_QUERIED", "Must query item from store before calling purchase");
-          return;
-        }
+    Runnable purchaseFlowRequest = () -> {
+      ProductDetails productDetails = mProductDetailsMap.get(skuId);
 
-        BillingFlowParams.Builder purchaseParams = BillingFlowParams.newBuilder().setSkuDetails(skuDetails);
-
-        if (oldPurchaseToken != null) {
-          purchaseParams.setSubscriptionUpdateParams(
-            BillingFlowParams.SubscriptionUpdateParams.newBuilder().setOldSkuPurchaseToken(oldPurchaseToken).build()
-          );
-        }
-
-        /**
-         * For Android billing to work without a 'Something went wrong on our end. Please try again.'
-         * error, we must provide BOTH obfuscatedAccountId and obfuscatedProfileId.
-         */
-        if (accountIdentifiers != null) {
-          String obfuscatedAccountId = accountIdentifiers.getString("obfuscatedAccountId");
-          String obfuscatedProfileId = accountIdentifiers.getString("obfuscatedProfileId");
-          if (obfuscatedAccountId != null && obfuscatedProfileId != null) {
-            purchaseParams.setObfuscatedAccountId(obfuscatedAccountId);
-            purchaseParams.setObfuscatedProfileId(obfuscatedProfileId);
-          }
-        }
-
-        // false will be the default, unless true is passed
-        // purchaseParams.setVrPurchaseFlow(isVrPurchaseFlow);
-
-        mBillingClient.launchBillingFlow(mActivity, purchaseParams.build());
+      if (productDetails == null) {
+        promise.reject("E_ITEM_NOT_QUERIED", "Must query item from store before calling purchase");
+        return;
       }
+
+      // Create a ProductDetailsParams object to use with BillingFlowParams
+      List<BillingFlowParams.ProductDetailsParams> productDetailsParamsList;
+      List<ProductDetails.SubscriptionOfferDetails> offerDetailsList = productDetails.getSubscriptionOfferDetails();
+      BillingFlowParams.ProductDetailsParams.Builder productDetailsParamsBuilder = BillingFlowParams.ProductDetailsParams.newBuilder()
+        .setProductDetails(productDetails);
+
+      if (offerDetailsList != null && !offerDetailsList.isEmpty()) {
+        // If offer details are available, set the offer token
+        String offerToken = offerDetailsList.get(0).getOfferToken();
+        productDetailsParamsBuilder.setOfferToken(offerToken);
+      }
+
+      // Build the ProductDetailsParams
+      productDetailsParamsList = Collections.singletonList(productDetailsParamsBuilder.build());
+
+      // Build the BillingFlowParams with the ProductDetailsParams
+      BillingFlowParams.Builder purchaseParamsBuilder = BillingFlowParams.newBuilder()
+        .setProductDetailsParamsList(productDetailsParamsList);
+
+      if (oldPurchaseToken != null) {
+        purchaseParamsBuilder.setSubscriptionUpdateParams(
+          BillingFlowParams.SubscriptionUpdateParams.newBuilder().setOldPurchaseToken(oldPurchaseToken).build()
+        );
+      }
+
+      /*
+        For Android billing to work without a 'Something went wrong on our end. Please try again.'
+        error, we must provide BOTH obfuscatedAccountId and obfuscatedProfileId.
+       */
+      if (accountIdentifiers != null) {
+        String obfuscatedAccountId = accountIdentifiers.getString("obfuscatedAccountId");
+        String obfuscatedProfileId = accountIdentifiers.getString("obfuscatedProfileId");
+        if (obfuscatedAccountId != null && obfuscatedProfileId != null) {
+          purchaseParamsBuilder.setObfuscatedAccountId(obfuscatedAccountId);
+          purchaseParamsBuilder.setObfuscatedProfileId(obfuscatedProfileId);
+        }
+      }
+
+      // false will be the default, unless true is passed
+      // purchaseParams.setVrPurchaseFlow(isVrPurchaseFlow);
+
+      mBillingClient.launchBillingFlow(mActivity, purchaseParamsBuilder.build());
     };
 
     executeServiceRequest(purchaseFlowRequest);
@@ -204,13 +208,10 @@ public class BillingManager implements PurchasesUpdatedListener {
   }
 
   public void acknowledgePurchaseAsync(String purchaseToken, final Promise promise) {
-    AcknowledgePurchaseResponseListener acknowledgePurchaseResponseListener = new AcknowledgePurchaseResponseListener() {
-      @Override
-      public void onAcknowledgePurchaseResponse(BillingResult billingResult) {
-        Bundle response = formatResponse(billingResult, null);
+    AcknowledgePurchaseResponseListener acknowledgePurchaseResponseListener = billingResult -> {
+      Bundle response = formatResponse(billingResult, null);
 
-        promise.resolve(response);
-      }
+      promise.resolve(response);
     };
 
     AcknowledgePurchaseParams acknowledgePurchaseParams =
@@ -241,25 +242,19 @@ public class BillingManager implements PurchasesUpdatedListener {
     mTokensToBeConsumed.add(purchaseToken);
 
     // Generating Consume Response listener
-    final ConsumeResponseListener onConsumeListener = new ConsumeResponseListener() {
-      @Override
-      public void onConsumeResponse(BillingResult billingResult, String purchaseToken) {
-        // If billing service was disconnected, we try to reconnect 1 time
-        mBillingUpdatesListener.onConsumeFinished(purchaseToken, billingResult);
-      }
+    final ConsumeResponseListener onConsumeListener = (billingResult, purchaseToken1) -> {
+      // If billing service was disconnected, we try to reconnect 1 time
+      mBillingUpdatesListener.onConsumeFinished(purchaseToken1, billingResult);
     };
 
     // Creating a runnable from the request to use it inside our connection retry policy below
-    Runnable consumeRequest = new Runnable() {
-      @Override
-      public void run() {
-        ConsumeParams consumeParams =
-          ConsumeParams.newBuilder()
-            .setPurchaseToken(purchaseToken)
-            .build();
-        // Consume the purchase async
-        mBillingClient.consumeAsync(consumeParams, onConsumeListener);
-      }
+    Runnable consumeRequest = () -> {
+      ConsumeParams consumeParams =
+        ConsumeParams.newBuilder()
+          .setPurchaseToken(purchaseToken)
+          .build();
+      // Consume the purchase async
+      mBillingClient.consumeAsync(consumeParams, onConsumeListener);
     };
 
     executeServiceRequest(consumeRequest);
@@ -287,43 +282,42 @@ public class BillingManager implements PurchasesUpdatedListener {
    * through a listener
    */
   public void queryPurchases(final Promise promise) {
-    Runnable queryToExecute = new Runnable() {
-      @Override
-      public void run() {
-        final Set<String> ALL_QUERIES = new HashSet(Arrays.asList(SkuType.INAPP, SkuType.SUBS));
-        List<Purchase> purchases = new ArrayList<>();
-        Set<String> completedQueries = new HashSet();
-        Set<BillingResult> billingResults = new HashSet();
+    Runnable queryToExecute = () -> {
+      final Set<String> ALL_QUERIES = new HashSet<>(Arrays.asList(BillingClient.ProductType.INAPP, BillingClient.ProductType.SUBS));
+      List<Purchase> purchases = new ArrayList<>();
+      Set<String> completedQueries = new HashSet<>();
+      Set<BillingResult> billingResults = new HashSet<>();
 
-        mBillingClient.queryPurchasesAsync(SkuType.INAPP, new PurchasesResponseListener() {
-          @Override
-          public void onQueryPurchasesResponse(@NonNull BillingResult billingResult, @NonNull List<Purchase> inAppPurchases) {
-            if (billingResult.getResponseCode() == BillingResponseCode.OK) {
-              purchases.addAll(inAppPurchases);
-            }
-            billingResults.add(billingResult);
-            completedQueries.add(SkuType.INAPP);
-            if (completedQueries.containsAll(ALL_QUERIES) || !areSubscriptionsSupported()) {
-              onQueryPurchasesFinished(aggregateBillingResults(billingResults), purchases, promise);
-            }
+      QueryPurchasesParams inAppPurchasesParams = QueryPurchasesParams.newBuilder()
+        .setProductType(BillingClient.ProductType.INAPP) // For in-app purchases
+        .build();
+
+      mBillingClient.queryPurchasesAsync(inAppPurchasesParams, (billingResult, inAppPurchases) -> {
+        if (billingResult.getResponseCode() == BillingResponseCode.OK) {
+          purchases.addAll(inAppPurchases);
+        }
+        billingResults.add(billingResult);
+        completedQueries.add(BillingClient.ProductType.INAPP);
+        if (completedQueries.containsAll(ALL_QUERIES) || !areSubscriptionsSupported()) {
+          onQueryPurchasesFinished(aggregateBillingResults(billingResults), purchases, promise);
+        }
+      });
+
+      if (areSubscriptionsSupported()) {
+        QueryPurchasesParams subsPurchasesParams = QueryPurchasesParams.newBuilder()
+          .setProductType(BillingClient.ProductType.SUBS) // For subscriptions
+          .build();
+
+        mBillingClient.queryPurchasesAsync(subsPurchasesParams, (billingResult, subscriptionPurchases) -> {
+          if (billingResult.getResponseCode() == BillingResponseCode.OK) {
+            purchases.addAll(subscriptionPurchases);
+          }
+          billingResults.add(billingResult);
+          completedQueries.add(BillingClient.ProductType.SUBS);
+          if (completedQueries.containsAll(ALL_QUERIES)) {
+            onQueryPurchasesFinished(aggregateBillingResults(billingResults), purchases, promise);
           }
         });
-
-        if (areSubscriptionsSupported()) {
-          mBillingClient.queryPurchasesAsync(SkuType.SUBS, new PurchasesResponseListener() {
-            @Override
-            public void onQueryPurchasesResponse(@NonNull BillingResult billingResult, @NonNull List<Purchase> subscriptionPurchases) {
-              if (billingResult.getResponseCode() == BillingResponseCode.OK) {
-                purchases.addAll(subscriptionPurchases);
-              }
-              billingResults.add(billingResult);
-              completedQueries.add(SkuType.SUBS);
-              if (completedQueries.containsAll(ALL_QUERIES)) {
-                onQueryPurchasesFinished(aggregateBillingResults(billingResults), purchases, promise);
-              }
-            }
-          });
-        }
       }
     };
 
@@ -341,52 +335,6 @@ public class BillingManager implements PurchasesUpdatedListener {
   }
 
   /**
-   * Does the same thing as queryPurchases except makes a network request (instead of using Google Play cache)
-   * and returns all records for every SKU of a given type, even if they're expired/consumed
-   */
-  public void queryPurchaseHistoryAsync(final Promise promise) {
-    Runnable queryToExecute = new Runnable() {
-      @Override
-      public void run() {
-        final ArrayList<Bundle> bundles = new ArrayList<>();
-
-        // Query in app product history
-        mBillingClient.queryPurchaseHistoryAsync(SkuType.INAPP,
-          new PurchaseHistoryResponseListener() {
-            @Override
-            public void onPurchaseHistoryResponse(final BillingResult inAppBillingResult,
-                                                  final List<PurchaseHistoryRecord> inAppList) {
-
-              if (inAppBillingResult.getResponseCode() == BillingResponseCode.OK && inAppList != null) {
-                for (PurchaseHistoryRecord purchaseHistory : inAppList) {
-                  bundles.add(purchaseHistoryToBundle(purchaseHistory));
-                }
-              }
-
-              // Query subscription history
-              mBillingClient.queryPurchaseHistoryAsync(SkuType.SUBS, new PurchaseHistoryResponseListener() {
-                @Override
-                public void onPurchaseHistoryResponse(BillingResult subsBillingResult, List<PurchaseHistoryRecord> subsList) {
-
-                  if (subsBillingResult.getResponseCode() == BillingResponseCode.OK && subsList != null) {
-                    for (PurchaseHistoryRecord purchaseHistory : subsList) {
-                      bundles.add(purchaseHistoryToBundle(purchaseHistory));
-                    }
-                  }
-
-                  Bundle response = formatResponse(inAppBillingResult, bundles);
-                  promise.resolve(response);
-                }
-              });
-            }
-          });
-      }
-    };
-
-    executeServiceRequest(queryToExecute);
-  }
-
-  /**
    * Format the result of a Purchase or Sku Details query depending on the result code
    */
   public static Bundle formatResponse(BillingResult billingResult, ArrayList<? extends Parcelable> results) {
@@ -394,7 +342,7 @@ public class BillingManager implements PurchasesUpdatedListener {
     int responseCode = billingResult.getResponseCode();
     if (responseCode == BillingResponseCode.OK) {
       response.putInt("responseCode", OK);
-      response.putParcelableArrayList("results", results != null ? results : new ArrayList<Parcelable>());
+      response.putParcelableArrayList("results", results != null ? results : new ArrayList<>());
     } else if (responseCode == BillingResponseCode.USER_CANCELED) {
       response.putInt("responseCode", USER_CANCELED);
     } else {
@@ -417,7 +365,7 @@ public class BillingManager implements PurchasesUpdatedListener {
         return 2;
       case BillingResponseCode.SERVICE_UNAVAILABLE:
         return 3;
-      case BillingResponseCode.SERVICE_TIMEOUT:
+      case BillingResponseCode.NETWORK_ERROR:
         return 4;
       case BillingResponseCode.BILLING_UNAVAILABLE:
         return 5;
@@ -449,49 +397,21 @@ public class BillingManager implements PurchasesUpdatedListener {
 
   }
 
-  private static Bundle skuToBundle(SkuDetails skuDetails) {
-    Bundle bundle = new Bundle();
-
-    String subscriptionPeriod =
-      skuDetails.getType().equals(SkuType.SUBS) ?
-        skuDetails.getSubscriptionPeriod() :
-        INAPP_SUB_PERIOD;
-
-    int type = skuDetails.getType().equals(SkuType.INAPP) ? 0 : 1;
-
-    bundle.putString("description", skuDetails.getDescription());
-    bundle.putString("price", skuDetails.getPrice());
-    bundle.putLong("priceAmountMicros", skuDetails.getPriceAmountMicros());
-    bundle.putString("priceCurrencyCode", skuDetails.getPriceCurrencyCode());
-    bundle.putString("productId", skuDetails.getSku());
-    bundle.putString("title", skuDetails.getTitle());
-    bundle.putInt("type", type);
-    bundle.putString("subscriptionPeriod", subscriptionPeriod);
-
-    return bundle;
-  }
-
   public static Bundle purchaseToBundle(Purchase purchase) {
     Bundle bundle = new Bundle();
 
     bundle.putBoolean("acknowledged", purchase.isAcknowledged());
     bundle.putString("orderId", purchase.getOrderId());
-    bundle.putString("productId", purchase.getSkus().get(0));
+
+    // Use getProducts() instead of getSkus()
+    if (!purchase.getProducts().isEmpty()) {
+      bundle.putString("productId", purchase.getProducts().get(0));
+    }
+
     bundle.putInt("purchaseState", purchaseStateNativeToJS(purchase.getPurchaseState()));
     bundle.putLong("purchaseTime", purchase.getPurchaseTime());
     bundle.putString("packageName", purchase.getPackageName());
     bundle.putString("purchaseToken", purchase.getPurchaseToken());
-
-    return bundle;
-  }
-
-  private static Bundle purchaseHistoryToBundle(PurchaseHistoryRecord purchaseRecord) {
-    Bundle bundle = new Bundle();
-
-    // PurchaseHistoryRecord is a subset of Purchase
-    bundle.putString("productId", purchaseRecord.getSkus().get(0));
-    bundle.putLong("purchaseTime", purchaseRecord.getPurchaseTime());
-    bundle.putString("purchaseToken", purchaseRecord.getPurchaseToken());
 
     return bundle;
   }
@@ -519,57 +439,71 @@ public class BillingManager implements PurchasesUpdatedListener {
     promise.resolve(response);
   }
 
-  public void querySkuDetailsAsync(final List<String> skuList,
-                                   final SkuDetailsResponseListener listener) {
+  public void queryProductDetailsAsync(final List<String> skuList, final ProductDetailsResponseListener listener) {
     // Creating a runnable from the request to use it inside our connection retry policy below
-    Runnable queryRequest = new Runnable() {
-      @Override
-      public void run() {
-        // Query in app product details
-        SkuDetailsParams.Builder params = SkuDetailsParams.newBuilder();
-        params.setSkusList(skuList).setType(SkuType.INAPP);
-        mBillingClient.querySkuDetailsAsync(params.build(),
-          new SkuDetailsResponseListener() {
-            @Override
-            public void onSkuDetailsResponse(BillingResult inAppResult,
-                                             final List<SkuDetails> skuDetails) {
-              // Query subscription details
-              SkuDetailsParams.Builder subs = SkuDetailsParams.newBuilder();
-              subs.setSkusList(skuList).setType(SkuType.SUBS);
-              mBillingClient.querySkuDetailsAsync(subs.build(), new SkuDetailsResponseListener() {
-                @Override
-                public void onSkuDetailsResponse(BillingResult billingResult, List<SkuDetails> subscriptionDetails) {
-                  if (skuDetails != null && subscriptionDetails != null) {
-                    skuDetails.addAll(subscriptionDetails);
-                  }
-                  listener.onSkuDetailsResponse(billingResult, skuDetails);
-                }
-              });
-            }
-          });
+    Runnable queryRequest = () -> {
+      // Build a list of ProductDetailsParams for in-app products
+      List<QueryProductDetailsParams.Product> inAppProducts = new ArrayList<>();
+      for (String sku : skuList) {
+        inAppProducts.add(
+          QueryProductDetailsParams.Product.newBuilder()
+            .setProductId(sku)
+            .setProductType(BillingClient.ProductType.INAPP)
+            .build()
+        );
       }
+
+      QueryProductDetailsParams inAppParams = QueryProductDetailsParams.newBuilder()
+        .setProductList(inAppProducts)
+        .build();
+
+      mBillingClient.queryProductDetailsAsync(inAppParams, (inAppResult, inAppDetails) -> {
+        // Build a list of ProductDetailsParams for subscriptions
+        List<QueryProductDetailsParams.Product> subsProducts = new ArrayList<>();
+        for (String sku : skuList) {
+          subsProducts.add(
+            QueryProductDetailsParams.Product.newBuilder()
+              .setProductId(sku)
+              .setProductType(BillingClient.ProductType.SUBS)
+              .build()
+          );
+        }
+
+        QueryProductDetailsParams subsParams = QueryProductDetailsParams.newBuilder()
+          .setProductList(subsProducts)
+          .build();
+
+        mBillingClient.queryProductDetailsAsync(subsParams, (subsResult, subsDetails) -> {
+          inAppDetails.addAll(subsDetails);
+          listener.onProductDetailsResponse(subsResult, inAppDetails);
+        });
+      });
     };
 
-    executeServiceRequest(queryRequest);
+    // Execute the query request (e.g., on a background thread)
+    queryRequest.run();
   }
 
   public void queryPurchasableItems(List<String> itemList, final Promise promise) {
-    querySkuDetailsAsync(itemList,
-      new SkuDetailsResponseListener() {
-        @Override
-        public void onSkuDetailsResponse(BillingResult billingResult, List<SkuDetails> skuDetailsList) {
-          ArrayList<Bundle> results = new ArrayList<>();
-          if (skuDetailsList != null) {
-            for (SkuDetails skuDetails : skuDetailsList) {
-              mSkuDetailsMap.put(skuDetails.getSku(), skuDetails);
-              results.add(skuToBundle(skuDetails));
-            }
-          }
-          Bundle response = formatResponse(billingResult, results);
-          promise.resolve(response);
-        }
+    queryProductDetailsAsync(itemList, (billingResult, productDetailsList) -> {
+      ArrayList<Bundle> results = new ArrayList<>();
+      for (ProductDetails productDetails : productDetailsList) {
+        mProductDetailsMap.put(productDetails.getProductId(), productDetails);
+        results.add(productToBundle(productDetails));
       }
-    );
+      Bundle response = formatResponse(billingResult, results);
+      promise.resolve(response);
+    });
+  }
+
+  private Bundle productToBundle(ProductDetails productDetails) {
+    Bundle bundle = new Bundle();
+    bundle.putString("productId", productDetails.getProductId());
+    bundle.putString("title", productDetails.getTitle());
+    bundle.putString("description", productDetails.getDescription());
+    bundle.putString("price", Objects.requireNonNull(productDetails.getOneTimePurchaseOfferDetails()).getFormattedPrice());
+    // Add more details as needed
+    return bundle;
   }
 
   private void executeServiceRequest(Runnable runnable) {
