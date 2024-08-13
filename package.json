@@ -1,0 +1,54 @@
+{
+  "name": "@drift-mobile/react-native-in-app-purchases",
+  "version": "14.6.2",
+  "description": "Expo unimodule for accepting in-app purchases",
+  "main": "build/InAppPurchases.js",
+  "types": "build/InAppPurchases.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "expo-module build",
+    "clean": "expo-module clean",
+    "lint": "expo-module lint",
+    "test": "expo-module test",
+    "prepare": "expo-module prepare",
+    "prepublishOnly": "expo-module prepublishOnly",
+    "expo-module": "expo-module",
+    "postpublish": "pinst --enable",
+    "pre-commit": "lint-staged"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "expo-in-app-purchases",
+    "react-native-in-app-purchases"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drift-mobile/react-native-in-app-purchases"
+  },
+  "bugs": {
+    "url": "https://github.com/drift-mobile/react-native-in-app-purchases/issues"
+  },
+  "author": "Drift Mobile S.L.",
+  "license": "MIT",
+  "homepage": "https://github.com/drift-mobile/react-native-in-app-purchases",
+  "dependencies": {
+    "expo-modules-core": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^17.8.1",
+    "@commitlint/config-conventional": "^17.8.1",
+    "expo-module-scripts": "^3.0.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^14.0.1",
+    "pinst": "^3.0.0",
+    "prettier": "^3.0.3",
+    "semantic-release": "^19.0.2"
+  },
+  "peerDependencies": {
+    "expo": "*"
+  }
+}
