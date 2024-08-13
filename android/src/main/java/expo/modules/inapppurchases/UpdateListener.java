@@ -16,8 +16,7 @@ import expo.modules.core.Promise;
  * Handler to billing updates
  */
 public class UpdateListener implements BillingManager.BillingUpdatesListener {
-  private static final String TAG = "UpdateListener";
-  private EventEmitter mEventEmitter;
+  private final EventEmitter mEventEmitter;
 
   public UpdateListener(EventEmitter eventEmitter) {
     mEventEmitter = eventEmitter;
